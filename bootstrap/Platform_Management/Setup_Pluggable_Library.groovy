@@ -27,7 +27,6 @@ echo "Library contents: "
 ls ${PLUGGABLE_SCM_PROVIDER_PATH}pluggable/scm/
 ''')
         systemGroovy {
-            source {
                 stringSystemScriptSource {
                     script {
                         script('''
@@ -72,7 +71,6 @@ jenkins.save()
                         sandbox(true)
                     }
                 }
-            }
         }
     }
     scm {
