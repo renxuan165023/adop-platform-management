@@ -39,16 +39,12 @@ loadCartridgeJob.with{
           name('CARTRIDGE_CLONE_URL')
           choiceListProvider {
             systemGroovyChoiceListProvider {
-              groovyScript {
-                script('''
+              scriptText('''
 import jenkins.model.*
-
 nodes = Jenkins.instance.globalNodeProperties
 nodes.getAll(hudson.slaves.EnvironmentVariablesNodeProperty.class)
 envVars = nodes[0].envVars
-
 def URLS = envVars['CARTRIDGE_SOURCES'];
-
 if (URLS == null) {
   println "[ERROR] CARTRIDGE_SOURCES Jenkins environment variable has not been set";
   return ['Type the cartridge URL (or add CARTRIDGE_SOURCES as a Jenkins environment variable if you wish to see a list here)'];
@@ -57,14 +53,10 @@ if (URLS.length() < 11) {
   println "[ERROR] CARTRIDGE_SOURCES Jenkins environment variable does not seem to contain valid URLs";
   return ['Type the cartridge URL (the CARTRIDGE_SOURCES Jenkins environment variable does not seem valid)'];
 }
-
 def cartridge_urls = [];
-
 URLS.split(';').each{ source_url ->
-
   try {
     def html = source_url.toURL().text;
-
     html.eachLine { line ->
       if (line.contains("url:")) {
         def url = line.substring(line.indexOf("\\"") + 1, line.lastIndexOf("\\""))
@@ -81,11 +73,8 @@ URLS.split(';').each{ source_url ->
     println "[ERROR] Unknown error while processing: ${source_url}";
   }
 }
-
 return cartridge_urls;
 ''')
-                sandbox(true)
-              }
               defaultChoice('Top')
               usePredefinedVariables(false)
             }
@@ -98,18 +87,14 @@ return cartridge_urls;
           name('SCM_PROVIDER')
           choiceListProvider {
             systemGroovyChoiceListProvider {
-              groovyScript { 
-                script('''
+              scriptText('''
 import hudson.model.*;
 import hudson.util.*;
-
 base_path = "/var/jenkins_home/userContent/datastore/pluggable/scm"
-
 // Initialise folder containing all SCM provider properties files
 String PropertiesPath = base_path + "/ScmProviders/"
 File folder = new File(PropertiesPath)
 def providerList = []
-
 // Loop through all files in properties data store and add to returned list
 for (File fileEntry : folder.listFiles()) {
   if (!fileEntry.isDirectory()){
@@ -125,14 +110,11 @@ for (File fileEntry : folder.listFiles()) {
     providerList.add(output)
   }
 }
-
 if (providerList.isEmpty()) {
     providerList.add("No SCM providers found")
 }
 return providerList;
 ''')
-                sandbox(true)
-              }
               defaultChoice('Top')
               usePredefinedVariables(false)
             }
@@ -150,6 +132,7 @@ return providerList;
         booleanParam('OVERWRITE_REPOS', false, 'If ticked, existing code repositories (previously loaded by the cartridge) will be overwritten. For first time cartridge runs, this property is redundant and will perform the same behavior regardless.')
     }
     environmentVariables {
+        groovy("return [SCM_KEY: org.apache.commons.lang.RandomStringUtils.randomAlphanumeric(20)]")
         env('WORKSPACE_NAME',workspaceFolderName)
         env('PROJECT_NAME',projectFolderName)
         keepBuildVariables(true)
@@ -158,10 +141,7 @@ return providerList;
     }
     wrappers {
         preBuildCleanup()
-        injectPasswords {
-            injectGlobalPasswords(true)
-            maskPasswordParameters(true)
-        }
+        injectPasswords()
         maskPasswords()
         credentialsBinding {
             file('SCM_SSH_KEY', 'adop-jenkins-private')
@@ -174,29 +154,13 @@ return providerList;
           relativeTo('''${JENKINS_HOME}/userContent''')
           hudsonHomeRelative(false)
         }
-        envInjectBuildWrapper {
-          info {
-            secureGroovyScript {
-                script("return [SCM_KEY: org.apache.commons.lang.RandomStringUtils.randomAlphanumeric(20)]")
-                sandbox(true)
-            }
-            propertiesFilePath(null)
-            propertiesContent(null)
-            scriptFilePath(null)
-            scriptContent(null)
-            loadFilesFromMaster(false)
-           }
-        }
     }
     label("!master && !windows && !ios")
     steps {
         shell('''#!/bin/bash -ex
-
 mkdir ${WORKSPACE}/tmp
-
 # Output SCM provider ID to a properties file
-echo SCM_PROVIDER_ID=$(echo ${SCM_PROVIDER} | cut -d "(" -f2 | cut -d ")" -f1) > ${WORKSPACE}/cartridge.properties
-
+echo SCM_PROVIDER_ID=$(echo ${SCM_PROVIDER} | cut -d "(" -f2 | cut -d ")" -f1) > ${WORKSPACE}/scm.properties
 # Check if SCM namespace is specified
 if [ -z ${SCM_NAMESPACE} ] ; then
     echo "SCM_NAMESPACE not specified, setting to PROJECT_NAME..."
@@ -208,11 +172,10 @@ if [ -z ${SCM_NAMESPACE} ] ; then
 else
     echo "SCM_NAMESPACE specified, injecting into properties file..."
 fi
-
-echo SCM_NAMESPACE=$(echo ${SCM_NAMESPACE} | cut -d "(" -f2 | cut -d ")" -f1) >> ${WORKSPACE}/cartridge.properties
+echo SCM_NAMESPACE=$(echo ${SCM_NAMESPACE} | cut -d "(" -f2 | cut -d ")" -f1) >> ${WORKSPACE}/scm.properties
 ''')
         environmentVariables {
-            propertiesFile('${WORKSPACE}/cartridge.properties')
+            propertiesFile('${WORKSPACE}/scm.properties')
         }
         systemGroovyCommand('''
 import com.cloudbees.plugins.credentials.*;
@@ -223,42 +186,31 @@ import pluggable.configuration.EnvVarProperty;
 import pluggable.scm.helpers.PropertyUtils;
 import java.util.Properties;
 import hudson.FilePath;
-
 println "[INFO] - Attempting to inject SCM provider credentials. Note: Not all SCM provider require a username/password combination."
-
 String scmProviderId = build.getEnvironment(listener).get('SCM_PROVIDER_ID');
-
 EnvVarProperty envVarProperty = EnvVarProperty.getInstance();
 envVarProperty.setVariableBindings(
   build.getEnvironment(listener));
-
 SCMProviderDataStore scmProviderDataStore = new PropertiesSCMProviderDataStore();
 Properties scmProviderProperties = scmProviderDataStore.get(scmProviderId);
-
 String credentialId = scmProviderProperties.get("loader.credentialId");
-
 if(credentialId != null){
-
   if(credentialId.equals("")){
     println "[WARN] - load.credentialId property provided but is an empty string. SCM providers that require a username/password may not behave as expected.";
     println "[WARN] - Credential secret file not created."
   }else{
     def username_matcher = CredentialsMatchers.withId(credentialId);
     def available_credentials = CredentialsProvider.lookupCredentials(StandardUsernameCredentials.class);
-
     def credential = CredentialsMatchers.firstOrNull(available_credentials, username_matcher);
-
     if(credential == null){
       println "[WARN] - Credential with id " + credentialId + " not found."
       println "[WARN] - SCM providers that require a username/password may not behave as expected.";
       println "[WARN] - Credential secret file not created."
     }else{
       credentialInfo = [credential.username, credential.password];
-
       channel = build.workspace.channel;
       filePath = new FilePath(channel, build.workspace.toString() + "@tmp/secretFiles/" + build.getEnvVars()["SCM_KEY"]);
       filePath.write("SCM_USERNAME="+credentialInfo[0]+"\\nSCM_PASSWORD="+credentialInfo[1], null);
-
       println "[INFO] - Credentials injected."
     }
   }
@@ -266,17 +218,15 @@ if(credentialId != null){
   println "[INFO] - No credential to inject. SCM provider load.credentialId property not found."
 }
 '''){
-  classpath("${PLUGGABLE_SCM_PROVIDER_PATH}")
+  classpath('${PLUGGABLE_SCM_PROVIDER_PATH}')
 }
         shell('''#!/bin/bash -ex
-
 # We trust everywhere
 echo -e "#!/bin/sh
 exec ssh -i ${SCM_SSH_KEY} -o StrictHostKeyChecking=no \"\\\$@\"
 " > ${WORKSPACE}/custom_ssh
 chmod +x ${WORKSPACE}/custom_ssh
 export GIT_SSH="${WORKSPACE}/custom_ssh"
-
 # Clone Cartridge
 echo "INFO: cloning ${CARTRIDGE_CLONE_URL}"
 # we do not want to show the password
@@ -288,14 +238,11 @@ else
     git clone ${CARTRIDGE_CLONE_URL} cartridge
 fi
 set -x
-
 # Find the cartridge
 export CART_HOME=$(dirname $(find -name metadata.cartridge | head -1))
 echo "CART_HOME=${CART_HOME}" > ${WORKSPACE}/carthome.properties
-
 # Output SCM provider ID to a properties file
 echo GIT_SSH="${GIT_SSH}" >> ${WORKSPACE}/scm_provider.properties
-
 # Provision one-time infrastructure
 if [ -d ${WORKSPACE}/${CART_HOME}/infra ]; then
     cd ${WORKSPACE}/${CART_HOME}/infra
@@ -305,7 +252,6 @@ if [ -d ${WORKSPACE}/${CART_HOME}/infra ]; then
         echo "INFO: ${CART_HOME}/infra/provision.sh not found"
     fi
 fi
-
 # Generate Jenkins Jobs
 if [ -d ${WORKSPACE}/${CART_HOME}/jenkins/jobs ]; then
     cd ${WORKSPACE}/${CART_HOME}/jenkins/jobs
@@ -316,22 +262,16 @@ if [ -d ${WORKSPACE}/${CART_HOME}/jenkins/jobs ]; then
     fi
 fi
 ''')
-    environmentVariables {
-      propertiesFile('${WORKSPACE}/carthome.properties')
-    }
-    environmentVariables {
-      propertiesFile('${WORKSPACE}/scm_provider.properties')
-    }
-
-    systemGroovy {
-        source {
-            stringSystemScriptSource {
-                script {
-                script('''
+        environmentVariables {
+          propertiesFile('${WORKSPACE}/carthome.properties')
+        }
+        environmentVariables {
+          propertiesFile('${WORKSPACE}/scm_provider.properties')
+        }
+        systemGroovyCommand('''
 import jenkins.model.*;
 import groovy.io.FileType;
 import hudson.FilePath;
-
 def jenkinsInstace = Jenkins.instance;
 def projectName = build.getEnvironment(listener).get('PROJECT_NAME');
 def cartHome = build.getEnvironment(listener).get('CART_HOME');
@@ -340,32 +280,21 @@ def cartridgeWorkspace = workspace + '/' + cartHome + '/jenkins/jobs/xml/';
 def channel = build.workspace.channel;
 FilePath filePath = new FilePath(channel, cartridgeWorkspace);
 List<FilePath> xmlFiles = filePath.list('**/*.xml');
-
 xmlFiles.each {
   File configFile = new File(it.toURI());
-
   String configXml = it.readToString();
-
   ByteArrayInputStream xmlStream = new ByteArrayInputStream(
     configXml.getBytes());
-
   String jobName = configFile.getName()
       .substring(0,
                    configFile
                    .getName()
                     .lastIndexOf('.'));
-
   jenkinsInstace.getItem(projectName,jenkinsInstace)
     .createProjectFromXML(jobName, xmlStream);
-
   println '[INFO] - Imported XML job config: ' + it.toURI();
 }
 ''')
-                    sandbox(true)
-                }
-            }
-        }
-    }
   environmentVariables {
       env('PLUGGABLE_SCM_PROVIDER_PATH','${WORKSPACE}/job_dsl_additional_classpath/')
       env('PLUGGABLE_SCM_PROVIDER_PROPERTIES_PATH','${WORKSPACE}/datastore/pluggable/scm')
@@ -377,22 +306,16 @@ xmlFiles.each {
 import pluggable.scm.SCMProvider;
 import pluggable.scm.SCMProviderHandler;
 import pluggable.configuration.EnvVarProperty;
-
 EnvVarProperty envVarProperty = EnvVarProperty.getInstance();
 envVarProperty.setVariableBindings(System.getenv());
-
 String scmProviderId = envVarProperty.getProperty('SCM_PROVIDER_ID')
-
 SCMProvider scmProvider = SCMProviderHandler.getScmProvider(scmProviderId, System.getenv())
-
 def workspace = envVarProperty.getProperty('WORKSPACE')
 def projectFolderName = envVarProperty.getProperty('PROJECT_NAME')
 def overwriteRepos = envVarProperty.getProperty('OVERWRITE_REPOS')
 def codeReviewEnabled = envVarProperty.getProperty('ENABLE_CODE_REVIEW')
-
 def cartridgeFolder = '';
 def scmNamespace = '';
-
 // Checking if the parameters have been set and they exist within the env properties
 if (envVarProperty.hasProperty('CARTRIDGE_FOLDER')){
   cartridgeFolder = envVarProperty.getProperty('CARTRIDGE_FOLDER')
@@ -404,9 +327,7 @@ if (envVarProperty.hasProperty('SCM_NAMESPACE')){
 }else{
   scmNamespace = ''
 }
-
 String repoNamespace = null;
-
 if (scmNamespace != null && !scmNamespace.isEmpty()){
   println("Custom SCM namespace specified...")
   repoNamespace = scmNamespace
@@ -420,7 +341,6 @@ if (scmNamespace != null && !scmNamespace.isEmpty()){
     repoNamespace = projectFolderName + "/" + cartridgeFolder
   }
 }
-
 scmProvider.createScmRepos(workspace, repoNamespace, codeReviewEnabled, overwriteRepos)
 ''')
                 }
@@ -432,29 +352,15 @@ scmProvider.createScmRepos(workspace, repoNamespace, codeReviewEnabled, overwrit
             groovyName("ADOP Groovy")
             classPath('''${WORKSPACE}/job_dsl_additional_classpath''')
         }
-        environmentVariables {
-         env('PLUGGABLE_SCM_PROVIDER_PATH','${JENKINS_HOME}/userContent/job_dsl_additional_classpath/')
-         env('PLUGGABLE_SCM_PROVIDER_PROPERTIES_PATH','${JENKINS_HOME}/userContent/datastore/pluggable/scm')
-         env('CARTRIDGE_FOLDER','${CARTRIDGE_FOLDER}')
-         env('WORKSPACE_NAME',workspaceFolderName)
-         env('PROJECT_NAME',projectFolderName)
-         env('FOLDER_DISPLAY_NAME','${FOLDER_DISPLAY_NAME}')
-         env('FOLDER_DESCRIPTION','${FOLDER_DESCRIPTION}')
-         propertiesFile('${WORKSPACE}/cartridge.properties')
-       }
         conditionalSteps {
             condition {
                 shell ('''#!/bin/bash
-
 # Checking to see if folder is specified and project name needs to be updated
-
 if [ -z ${CARTRIDGE_FOLDER} ] ; then
     echo "Folder name not specified, moving on..."
-    echo PROJECT_NAME=${PROJECT_NAME} >> cartridge.properties
     exit 1
 else
     echo "Folder name specified, changing project name value.."
-    echo PROJECT_NAME=${PROJECT_NAME}/${CARTRIDGE_FOLDER} >> cartridge.properties
     exit 0
 fi
                 ''')
@@ -462,22 +368,22 @@ fi
             runner('RunUnstable')
             steps {
                 environmentVariables {
-                  propertiesFile('${WORKSPACE}/cartridge.properties')
+                    env('CARTRIDGE_FOLDER','${CARTRIDGE_FOLDER}')
+                    env('WORKSPACE_NAME',workspaceFolderName)
+                    env('PROJECT_NAME',projectFolderName + '/${CARTRIDGE_FOLDER}')
+                    env('FOLDER_DISPLAY_NAME','${FOLDER_DISPLAY_NAME}')
+                    env('FOLDER_DESCRIPTION','${FOLDER_DESCRIPTION}')
                 }
                 dsl {
                     text('''// Creating folder to house the cartridge...
-
 def cartridgeFolderName = "${PROJECT_NAME}"
 def FolderDisplayName = "${FOLDER_DISPLAY_NAME}"
-
 if (FolderDisplayName=="") {
     println "Folder display name not specified, using folder name..."
     FolderDisplayName = "${CARTRIDGE_FOLDER}"
 }
-
 def FolderDescription = "${FOLDER_DESCRIPTION}"
 println("Creating folder: " + cartridgeFolderName + "...")
-
 def cartridgeFolder = folder(cartridgeFolderName) {
   displayName(FolderDisplayName)
   description(FolderDescription)
@@ -487,7 +393,9 @@ def cartridgeFolder = folder(cartridgeFolderName) {
             }
         }
        environmentVariables {
-         propertiesFile('${WORKSPACE}/cartridge.properties')
+         env('PLUGGABLE_SCM_PROVIDER_PATH','${JENKINS_HOME}/userContent/job_dsl_additional_classpath/')
+         env('PLUGGABLE_SCM_PROVIDER_PROPERTIES_PATH','${JENKINS_HOME}/userContent/datastore/pluggable/scm')
+         propertiesFile('${WORKSPACE}/scm.properties')
        }
         dsl {
             external("cartridge/**/jenkins/jobs/dsl/*.groovy")
@@ -525,46 +433,34 @@ loadCartridgeCollectionJob.with{
     definition {
         cps {
             script('''node {
-
     sh("wget ${COLLECTION_URL} -O collection.json")
-
     println "Reading in values from file..."
     cartridges = parseJSON(readFile('collection.json'))
-
     println(cartridges);
     println "Obtained values locally...";
-
-    cartridgeCount = cartridges.size()
+    cartridgeCount = cartridges.size
     println "Number of cartridges: ${cartridgeCount}"
-
     def projectWorkspace =  "''' + projectFolderName + '''"
     println "Project workspace: ${projectWorkspace}"
-
     // For loop iterating over the data map obtained from the provided JSON file
     for (int i = 0; i < cartridgeCount; i++) {
         def cartridge = cartridges.get(i);
-
         println("Loading cartridge inside folder: " + cartridge.folder)
         println("Cartridge URL: " + cartridge.url)
-
         build job: projectWorkspace+'/Cartridge_Management/Load_Cartridge', parameters: [[$class: 'StringParameterValue', name: 'CARTRIDGE_FOLDER', value: cartridge.folder], [$class: 'StringParameterValue', name: 'FOLDER_DISPLAY_NAME', value: cartridge.display_name], [$class: 'StringParameterValue', name: 'FOLDER_DESCRIPTION', value: cartridge.desc], [$class: 'StringParameterValue', name: 'CARTRIDGE_CLONE_URL', value: cartridge.url]]
     }
-
 }
-
 @NonCPS
     def parseJSON(text) {
     def slurper = new groovy.json.JsonSlurper();
     Map data = slurper.parseText(text)
     slurper = null
-
     def cartridges = []
-    for ( i = 0 ; i < data.cartridges.size(); i++ ) {
+    for ( i = 0 ; i < data.cartridges.size; i++ ) {
         String url = data.cartridges[i].cartridge.url
         String desc = data.cartridges[i].folder.description
         String folder = data.cartridges[i].folder.name
         String display_name = data.cartridges[i].folder.display_name
-
         cartridges[i] = [
             'url' : url,
             'desc' : desc,
@@ -572,13 +468,11 @@ loadCartridgeCollectionJob.with{
             'display_name' : display_name
         ]
     }
-
     data = null
-
     return cartridges
 }
             ''')
-            sandbox(true)
+            sandbox()
         }
     }
 }
